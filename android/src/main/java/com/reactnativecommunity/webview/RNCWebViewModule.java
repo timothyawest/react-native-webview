@@ -45,6 +45,7 @@ public class RNCWebViewModule extends ReactContextBaseJavaModule implements Acti
   private ValueCallback<Uri> filePathCallbackLegacy;
   private ValueCallback<Uri[]> filePathCallback;
   private Uri outputFileUri;
+  private Uri outputVideoUri;     //added because there are two potential choices and in some versions android we don't know what was chosen
   private DownloadManager.Request downloadRequest;
   private PermissionListener webviewFileDownloaderPermissionListener = new PermissionListener() {
     @Override
@@ -88,6 +89,27 @@ public class RNCWebViewModule extends ReactContextBaseJavaModule implements Acti
     }
     promise.resolve(result);
   }
+  private boolean isAValidFileStream(Uri uriToCheck){
+    InputStream in = null;
+    if(outputVideoUri !=null){
+      try {
+            in = getCurrentActivity().getApplicationContext().getContentResolver().openInputStream(uriToCheck);//I have context object
+            if( in.read() !=-1){
+              return true;
+            }
+      } catch (Exception ex) {
+          ex.printStackTrace();
+      } finally {
+            try {
+              in.close();
+              in=null;
+            } catch (IOException e) {
+              e.printStackTrace();
+            }
+      }
+    }
+    return false;
+  }
 
   public void onActivityResult(Activity activity, int requestCode, int resultCode, Intent data) {
 
@@ -98,6 +120,7 @@ public class RNCWebViewModule extends ReactContextBaseJavaModule implements Acti
     // based off of which button was pressed, we get an activity result and a file
     // the camera activity doesn't properly return the filename* (I think?) so we use
     // this filename instead
+    
     switch (requestCode) {
       case PICKER:
         if (resultCode != RESULT_OK) {
@@ -108,11 +131,17 @@ public class RNCWebViewModule extends ReactContextBaseJavaModule implements Acti
           Uri result[] = this.getSelectedFiles(data, resultCode);
           if (result != null) {
             filePathCallback.onReceiveValue(result);
-          } else {
+         } else {
+          //This code is for the case where we have no idea which was chosen video or image... there seems no way in some versions of android to know
+          //tested on samsung 
+          if(this.isAValidFileStream(outputVideoUri)){
+              filePathCallback.onReceiveValue(new Uri[]{outputVideoUri});
+          }else if(this.isAValidFileStream(outputFileUri)){
             filePathCallback.onReceiveValue(new Uri[]{outputFileUri});
           }
         }
-        break;
+    }        
+       break;
       case PICKER_LEGACY:
         Uri result = resultCode != Activity.RESULT_OK ? null : data == null ? outputFileUri : data.getData();
         filePathCallbackLegacy.onReceiveValue(result);
@@ -131,7 +160,6 @@ public class RNCWebViewModule extends ReactContextBaseJavaModule implements Acti
     if (data == null) {
       return null;
     }
-
     // we have one file selected
     if (data.getData() != null) {
       if (resultCode == RESULT_OK && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -140,7 +168,7 @@ public class RNCWebViewModule extends ReactContextBaseJavaModule implements Acti
         return null;
       }
     }
-
+    
     // we have multiple files selected
     if (data.getClipData() != null) {
       final int numSelectedFiles = data.getClipData().getItemCount();
@@ -192,8 +220,9 @@ public class RNCWebViewModule extends ReactContextBaseJavaModule implements Acti
     Intent chooserIntent = new Intent(Intent.ACTION_CHOOSER);
     chooserIntent.putExtra(Intent.EXTRA_INTENT, fileSelectionIntent);
     chooserIntent.putExtra(Intent.EXTRA_INITIAL_INTENTS, extraIntents.toArray(new Parcelable[]{}));
-
-    if (chooserIntent.resolveActivity(getCurrentActivity().getPackageManager()) != null) {
+    ComponentName info;
+    if ((info =chooserIntent.resolveActivity(getCurrentActivity().getPackageManager())) != null) {
+      Log.d("tim's debug: ", info.toString());
       getCurrentActivity().startActivityForResult(chooserIntent, PICKER);
     } else {
       Log.w("RNCWebViewModule", "there is no Activity to handle this Intent");
@@ -244,35 +273,38 @@ public class RNCWebViewModule extends ReactContextBaseJavaModule implements Acti
     Intent intent = new Intent(MediaStore.ACTION_VIDEO_CAPTURE);
     // @todo from experience, for Videos we get the data onActivityResult
     // so there's no need to store the Uri
-    Uri outputVideoUri = getOutputUri(MediaStore.ACTION_VIDEO_CAPTURE);
+    outputVideoUri = getOutputUri(MediaStore.ACTION_VIDEO_CAPTURE);
     intent.putExtra(MediaStore.EXTRA_OUTPUT, outputVideoUri);
     return intent;
   }
-
   private Intent getFileChooserIntent(String acceptTypes) {
-    String _acceptTypes = acceptTypes;
-    if (acceptTypes.isEmpty()) {
-      _acceptTypes = DEFAULT_MIME_TYPES;
-    }
-    if (acceptTypes.matches("\\.\\w+")) {
+    String _acceptTypes = new String(acceptTypes);
+    if (_acceptTypes.matches("\\.\\w+")) {
       _acceptTypes = getMimeTypeFromExtension(acceptTypes.replace(".", ""));
     }
     Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
     intent.addCategory(Intent.CATEGORY_OPENABLE);
-    intent.setType(_acceptTypes);
+    intent.setType("*/*");
+    if(_acceptTypes.isEmpty())
+      _acceptTypes = "*/*";
+    String acceptTypesArr[] = new String[]{_acceptTypes};
+    intent.putExtra(Intent.EXTRA_MIME_TYPES,acceptTypesArr);
     return intent;
   }
 
   private Intent getFileChooserIntent(String[] acceptTypes, boolean allowMultiple) {
+    String[] _acceptTypes = acceptTypes.clone();
     Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
     intent.addCategory(Intent.CATEGORY_OPENABLE);
     intent.setType("*/*");
-    intent.putExtra(Intent.EXTRA_MIME_TYPES, getAcceptedMimeType(acceptTypes));
+    if(isArrayEmpty(_acceptTypes) )
+      _acceptTypes[0] = "*/*";
+    intent.putExtra(Intent.EXTRA_MIME_TYPES, _acceptTypes);
     intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, allowMultiple);
     return intent;
   }
 
-  private Boolean acceptsImages(String types) {
+  private Boolean acceptsImages(String types) { 
     String mimeType = types;
     if (types.matches("\\.\\w+")) {
       mimeType = getMimeTypeFromExtension(types.replace(".", ""));
@@ -280,9 +312,9 @@ public class RNCWebViewModule extends ReactContextBaseJavaModule implements Acti
     return mimeType.isEmpty() || mimeType.toLowerCase().contains("image");
   }
 
-  private Boolean acceptsImages(String[] types) {
+  private Boolean acceptsImages(String[] types) { 
     String[] mimeTypes = getAcceptedMimeType(types);
-    return isArrayEmpty(mimeTypes) || arrayContainsString(mimeTypes, "image") || arrayContainsString(mimeTypes,"*/*"); //mimeTypes is never really empty it has */* in it if webpage input="file" does not have tag 'accept="image/*"'
+    return isArrayEmpty(mimeTypes) || arrayContainsString(mimeTypes, "image") || arrayContainsString(mimeTypes, "*/*"); 
   }
 
   private Boolean acceptsVideo(String types) {
@@ -295,7 +327,7 @@ public class RNCWebViewModule extends ReactContextBaseJavaModule implements Acti
 
   private Boolean acceptsVideo(String[] types) {
     String[] mimeTypes = getAcceptedMimeType(types);
-    return isArrayEmpty(mimeTypes) || arrayContainsString(mimeTypes, "image") || arrayContainsString(mimeTypes,"*/*"); //mimeTypes is never really empty it has */* in it if webpage input="file" does not have tag 'accept="image/*"'
+    return isArrayEmpty(mimeTypes) || arrayContainsString(mimeTypes, "video") || arrayContainsString(mimeTypes, "*/*");
   }
 
   private Boolean arrayContainsString(String[] array, String pattern) {
@@ -357,7 +389,6 @@ public class RNCWebViewModule extends ReactContextBaseJavaModule implements Acti
     String suffix = "";
     String dir = "";
     String filename = "";
-
     if (intentType.equals(MediaStore.ACTION_IMAGE_CAPTURE)) {
       prefix = "image-";
       suffix = ".jpg";
@@ -368,16 +399,15 @@ public class RNCWebViewModule extends ReactContextBaseJavaModule implements Acti
       dir = Environment.DIRECTORY_MOVIES;
     }
 
-    filename = prefix + String.valueOf(System.currentTimeMillis()) + suffix;
-
     // for versions below 6.0 (23) we use the old File creation & permissions model
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+      filename = prefix + String.valueOf(System.currentTimeMillis()) + suffix;
       // only this Directory works on all tested Android versions
       // ctx.getExternalFilesDir(dir) was failing on Android 5.0 (sdk 21)
       File storageDir = Environment.getExternalStoragePublicDirectory(dir);
       return new File(storageDir, filename);
     }
-
+    filename = prefix + String.valueOf(System.currentTimeMillis());
     File storageDir = getReactApplicationContext().getExternalFilesDir(null);
     return File.createTempFile(filename, suffix, storageDir);
   }
@@ -399,3 +429,4 @@ public class RNCWebViewModule extends ReactContextBaseJavaModule implements Acti
     return (PermissionAwareActivity) activity;
   }
 }
+
